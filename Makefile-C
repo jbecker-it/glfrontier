@@ -1,20 +1,37 @@
 THIS=Makefile-C
 VERSION=20060623
 
-SRCOBJS := audio.o hostcall.o keymap.o main.o shortcut.o input.o joystick.o
+SRCOBJS := audio.o hostcall.o keymap.o main.o shortcut.o input.o joystick.o \
+	platform.o ini.o touch.o
 
 COMPILER ?= gcc
 CC := $(CROSS_COMPILE)$(COMPILER)
 
-SDL_CONFIG := $(shell $(CC) --print-sysroot)/usr/bin/sdl-config
+# sdl2-config from the target sysroot when cross-compiling, otherwise
+# whatever is on PATH.
+SYSROOT := $(shell $(CC) --print-sysroot)
+SDL_CONFIG := $(firstword $(wildcard $(SYSROOT)/usr/bin/sdl2-config) sdl2-config)
 SDL_CFLAGS := $(shell $(SDL_CONFIG) --cflags)
 SDL_LIBS := $(shell $(SDL_CONFIG) --libs)
 
-CFLAGS := -O3 -fomit-frame-pointer -Wall -Wno-unused $(SDL_CFLAGS) -DOGG_MUSIC
+CFLAGS := -O3 -fomit-frame-pointer -Wall -Wno-unused -Wno-pointer-sign $(SDL_CFLAGS)
 
-LIBS := -lvorbisfile -lvorbis -logg -lini $(SDL_LIBS) -lSDL_image
+# libini and SDL_image are gone: the ini parser is in src/ini.c and the
+# mouse cursor is embedded in src/cursor_data.h, so neither has to be
+# cross-compiled for a target.
+LIBS := $(SDL_LIBS) -lm
 
-WITH_GL=y
+# Ogg music is optional and off by default - the README notes there is no
+# music to play yet, and it is one less library to cross-compile.
+WITH_OGG?=n
+ifeq ($(WITH_OGG),y)
+	CFLAGS += -DOGG_MUSIC
+	LIBS += -lvorbisfile -lvorbis -logg
+endif
+
+# The GL renderer is desktop-only: it needs immediate mode and the GLU
+# tessellator, neither of which exists in OpenGL ES.
+WITH_GL?=n
 ifeq ($(WITH_GL),y)
 	SRCOBJS += gl.o
 	LIBS += -lGL -lGLU

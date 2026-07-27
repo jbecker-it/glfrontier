@@ -1,0 +1,72 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace 'org.glfrontier'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId 'org.glfrontier'
+        // SDL_AndroidGetInternalStoragePath and the touch APIs used here
+        // are all present well below this; 21 keeps 64-bit ABIs simple.
+        minSdk 21
+        targetSdk 34
+        versionCode 1
+        versionName '1.0'
+
+        externalNativeBuild {
+            cmake {
+                arguments '-DANDROID_STL=none'
+                // 32-bit ABIs are included because the recompiled 68k core
+                // is pointer-width agnostic and older devices still run it
+                // fine. Drop them to halve build time.
+                abiFilters 'arm64-v8a', 'armeabi-v7a'
+            }
+        }
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'jni/CMakeLists.txt'
+            version '3.22.1'
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'),
+                    'proguard-rules.pro'
+        }
+    }
+
+    lint {
+        abortOnError false
+    }
+}
+
+/*
+ * Stage the runtime data files into the APK asset bundle.
+ *
+ * SDL_RWFromFile resolves relative paths against assets on Android, so
+ * the game's own "joystick.ini" and "sfx/..." paths keep working with no
+ * special casing in the C code.
+ *
+ * Note what is NOT here: fe2.s and the recompiled sources. Those are
+ * built into the native library from your own copy of the game, and are
+ * not redistributable. See ../README-android.md.
+ */
+tasks.register('stageAssets', Copy) {
+    into layout.projectDirectory.dir('src/main/assets')
+
+    from(rootProject.file('../joystick.ini'))
+
+    from(rootProject.file('../sfx')) {
+        into 'sfx'
+    }
+}
+
+tasks.configureEach { task ->
+    if (task.name.startsWith('merge') && task.name.endsWith('Assets')) {
+        task.dependsOn 'stageAssets'
+    }
+}

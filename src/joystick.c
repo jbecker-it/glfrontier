@@ -1,7 +1,7 @@
-#include <ini.h>
 #include <SDL.h>
 
 #include "main.h"
+#include "ini.h"
 #include "input.h"
 #include "joystick.h"
 #include "screen.h"
@@ -115,6 +115,12 @@ static struct {
 /* Joystick button to ST scan code mapping table */
 static int JoystickButtonToSTScanCode[MODE_LAST][JS_NB_BUTTONS_MAX];
 
+/* The action each button is bound to, for the same slots. Points into the
+ * string literals in action_to_code, so it needs no ownership. The touch
+ * overlay uses this to label its on-screen buttons, which means the
+ * overlay follows joystick.ini instead of duplicating the binding table. */
+static const char *JoystickButtonToAction[MODE_LAST][JS_NB_BUTTONS_MAX];
+
 static unsigned char current_mode = MODE_MOUSE;
 
 
@@ -127,18 +133,26 @@ static void read_key_config(struct INI *ini, unsigned char mode)
 {
 	for (;;) {
 		const char *key, *val;
+		const char *action = NULL;
 		size_t lkey, lval;
 		unsigned int i;
-		unsigned char code = 0, button;
+		unsigned char code = 0;
+		int button;
 		int ret = ini_read_pair(ini, &key, &lkey, &val, &lval);
 		if (ret <= 0)
 			break;
 
-		for (i = 0; i < ARRAY_SIZE(action_to_code); i++)
-			if (!strncmp(action_to_code[i].action, key, lkey)) {
+		for (i = 0; i < ARRAY_SIZE(action_to_code); i++) {
+			/* Compare the whole name, not just the first lkey
+			 * characters: a prefix match would let "F1" bind
+			 * whichever of F1/F10 happens to come first. */
+			if (strlen(action_to_code[i].action) == lkey &&
+			    !strncmp(action_to_code[i].action, key, lkey)) {
 				code = action_to_code[i].code;
+				action = action_to_code[i].action;
 				break;
 			}
+		}
 
 		if (!code) {
 			fprintf(stderr, "Skipping unknown key: %.*s\n", (int) lkey, key);
@@ -146,7 +160,14 @@ static void read_key_config(struct INI *ini, unsigned char mode)
 		}
 
 		button = atoi(val);
+		if (button < 0 || button >= JS_NB_BUTTONS_MAX) {
+			fprintf(stderr, "Button %d out of range for action %.*s\n",
+					button, (int) lkey, key);
+			continue;
+		}
+
 		JoystickButtonToSTScanCode[mode][button] = code;
+		JoystickButtonToAction[mode][button] = action;
 	}
 }
 
@@ -197,7 +218,9 @@ void Keymap_JoystickUpDown(unsigned int button, int pressed)
 	static unsigned int button_already_pressed;
 	char code;
 
-	if (button > 16)
+	/* The table holds JS_NB_BUTTONS_MAX entries, so the last valid index
+	 * is one below that - ">" here read one past the end. */
+	if (button >= JS_NB_BUTTONS_MAX)
 		return;
 
 	code = JoystickButtonToSTScanCode[current_mode][button];
@@ -284,4 +307,12 @@ void joystick_motion(unsigned int axis, int value)
 int in_mouse_mode(void)
 {
 	return current_mode == MODE_MOUSE;
+}
+
+const char *joystick_action_for_button(unsigned int button)
+{
+	if (button >= JS_NB_BUTTONS_MAX)
+		return NULL;
+
+	return JoystickButtonToAction[current_mode][button];
 }

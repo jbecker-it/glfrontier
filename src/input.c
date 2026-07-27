@@ -7,6 +7,7 @@
 #include "../m68000.h"
 #include "shortcut.h"
 #include "screen.h"
+#include "touch.h"
 
 INPUT input;
 
@@ -81,11 +82,17 @@ void Input_PressSTKey (unsigned char ScanCode, BOOL bPress)
 
 static void do_mouse_grab ()
 {
-	/* grab mouse on right-button hold for correct controls */
+	/* On a touch device there is no pointer to capture, and switching
+	 * SDL into relative mode would stop the on-screen trackpad working. */
+	if (Touch_Enabled ()) return;
+
+	/* Capture the pointer while the right button is held: that is
+	 * Frontier's flight control, and it needs unbounded relative motion
+	 * rather than a cursor that stops at the window edge. */
 	if (input.cur_mousebut_state & 0x1) {
-		SDL_WM_GrabInput (SDL_GRAB_ON);
+		SDL_SetRelativeMouseMode (SDL_TRUE);
 	} else {
-		SDL_WM_GrabInput (SDL_GRAB_OFF);
+		SDL_SetRelativeMouseMode (SDL_FALSE);
 	}
 }
 

@@ -7,6 +7,31 @@ This repository does not provide this file as it would contain copyrighted
 data, and as such is not freely redistribuable.
 
 
+ANDROID
+~~~~~~~
+There is an Android port with touch controls. See README-android.md.
+
+
+BUILDING (desktop)
+~~~~~~~~~~~~~~~~~~
+This now needs SDL2 rather than SDL 1.2. libini and SDL_image are no
+longer required - the ini parser is in src/ini.c and the mouse cursor is
+embedded in src/cursor_data.h.
+
+	make -f Makefile-C            # software renderer (default)
+	make -f Makefile-C WITH_GL=y  # OpenGL renderer, desktop only
+	make -f Makefile-C WITH_OGG=y # with Ogg Vorbis music
+
+Or with CMake, which is also what the Android build uses:
+
+	cmake -B build && cmake --build build
+
+Either way you must generate the recompiled 68k sources first, from your
+own fe2.s - see below.
+
+There are host-side tests for the touch and ini code: make -C tests run
+
+
 FrontierVM 3 :D
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 This thing uses code from:

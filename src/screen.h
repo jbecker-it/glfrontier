@@ -48,6 +48,14 @@ extern void Screen_Init(void);
 extern void Screen_UnInit(void);
 extern void Screen_ToggleFullScreen (void);
 extern void Screen_ToggleRenderer ();
+/* Recompute the letterbox and control layout after the window changed
+ * size. Unfolding a foldable arrives here. */
+extern void Screen_HandleResize (void);
+/* Top-left corner of the game image within the window, in output pixels.
+ * Window-relative pointer coordinates need this subtracted before they
+ * mean anything to the game. */
+extern int Screen_ViewportX (void);
+extern int Screen_ViewportY (void);
 
 extern void Nu_PutComplexStart ();
 extern void Nu_PutTriangle ();

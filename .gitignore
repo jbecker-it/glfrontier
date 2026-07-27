@@ -3,3 +3,26 @@ frontier
 fe2.s.*
 fixups.h
 gen
+
+# The original game binary and its disassembly are not redistributable.
+fe2.s
+*.prg
+
+# CMake
+build/
+CMakeCache.txt
+CMakeFiles/
+
+# Android
+android/.gradle/
+android/build/
+android/local.properties
+android/app/build/
+android/app/.cxx/
+android/app/jni/SDL
+android/app/src/main/assets/*
+!android/app/src/main/assets/.gitignore
+
+# Tests
+tests/test_touch
+tests/test_ini

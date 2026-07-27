@@ -26,7 +26,8 @@ unsigned int CtrlRGBPalette[16];
 
 unsigned long logscreen, logscreen2, physcreen, physcreen2;
 
-static SDL_Surface *sdlscrn;                             /* The SDL screen surface */
+static SDL_Window *window;
+static SDL_GLContext gl_context;
 BOOL bGrabMouse = FALSE;                          /* Grab the mouse cursor in the window */
 BOOL bInFullScreen = FALSE;
 
@@ -82,26 +83,8 @@ static void set_ctrl_viewport ()
 	glViewport (0, 0, screen_w, screen_h);
 }
 
-static void change_vidmode ()
+static void init_gl_state ()
 {
-	const SDL_VideoInfo *info = NULL;
-	int modes;
-
-	info = SDL_GetVideoInfo ();
-
-	assert (info != NULL);
-
-	SDL_GL_SetAttribute (SDL_GL_DOUBLEBUFFER, 1);
-	
-	modes = SDL_OPENGL | SDL_ANYFORMAT | (bInFullScreen ? SDL_FULLSCREEN : 0);
-	
-	if ((sdlscrn = SDL_SetVideoMode (screen_w, screen_h,
-				info->vfmt->BitsPerPixel, modes)) == 0) {
-		fprintf (stderr, "Video mode set failed: %s\n", SDL_GetError ());
-		SDL_Quit ();
-		exit (-1);
-	}
-
 	glDisable (GL_CULL_FACE);
 	glShadeModel (GL_FLAT);
 	glDisable (GL_DEPTH_TEST);
@@ -132,8 +115,27 @@ static void change_vidmode ()
 
 void Screen_Init(void)
 {
-	change_vidmode ();
-	
+	SDL_GL_SetAttribute (SDL_GL_DOUBLEBUFFER, 1);
+
+	window = SDL_CreateWindow (PROG_NAME, SDL_WINDOWPOS_UNDEFINED,
+			SDL_WINDOWPOS_UNDEFINED, screen_w, screen_h,
+			SDL_WINDOW_OPENGL | SDL_WINDOW_RESIZABLE |
+			(bInFullScreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0));
+	if (!window) {
+		fprintf (stderr, "Cannot create window: %s\n", SDL_GetError ());
+		SDL_Quit ();
+		exit (-1);
+	}
+
+	gl_context = SDL_GL_CreateContext (window);
+	if (!gl_context) {
+		fprintf (stderr, "Cannot create GL context: %s\n", SDL_GetError ());
+		SDL_Quit ();
+		exit (-1);
+	}
+
+	init_gl_state ();
+
 	qobj = gluNewQuadric ();
 
 	tobj = gluNewTess ();
@@ -144,8 +146,6 @@ void Screen_Init(void)
 	gluTessCallback(tobj, GLU_TESS_ERROR, (_GLUfuncptr) errorCallback);
 	gluTessCallback(tobj, GLU_TESS_COMBINE, (_GLUfuncptr) combineCallback);
 	
-	/* Configure some SDL stuff: */
-	SDL_WM_SetCaption(PROG_NAME, "Frontier");
 	SDL_EventState(SDL_MOUSEMOTION, SDL_ENABLE);
 	SDL_EventState(SDL_MOUSEBUTTONDOWN, SDL_ENABLE);
 	SDL_EventState(SDL_MOUSEBUTTONUP, SDL_ENABLE);
@@ -154,13 +154,41 @@ void Screen_Init(void)
 
 void Screen_UnInit(void)
 {
+	if (gl_context) SDL_GL_DeleteContext (gl_context);
+	if (window) SDL_DestroyWindow (window);
+	gl_context = NULL;
+	window = NULL;
+}
+
+void Screen_HandleResize (void)
+{
+	if (!window) return;
+
+	SDL_GL_GetDrawableSize (window, &screen_w, &screen_h);
+	/* fe2 wants a 1.6 aspect until the mouse-to-3d mapping is fixed */
+	screen_h = 5 * screen_w / 8;
+}
+
+/* The GL renderer draws the game across the whole window, so there is no
+ * letterbox offset to account for. */
+int Screen_ViewportX (void)
+{
+	return 0;
+}
+
+int Screen_ViewportY (void)
+{
+	return 0;
 }
 
 void Screen_ToggleFullScreen ()
 {
 	bInFullScreen = !bInFullScreen;
-	change_vidmode ();
-	//SDL_WM_ToggleFullScreen (sdlscrn);
+
+	if (SDL_SetWindowFullscreen (window,
+			bInFullScreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0)
+		fprintf (stderr, "Cannot change fullscreen mode: %s\n",
+				SDL_GetError ());
 }
 
 static const unsigned char font_bmp[] = {
@@ -1866,7 +1894,7 @@ void Nu_DrawScreen ()
 	draw_control_panel ();
 	glFlush ();
 	
-	SDL_GL_SwapBuffers ();
+	SDL_GL_SwapWindow (window);
 
 	/* frontier background color... */
 	if (use_renderer == R_GLWIRE) {

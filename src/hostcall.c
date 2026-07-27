@@ -26,6 +26,7 @@
 #include "main.h"
 #include "../host.h"
 #include "hostcall.h"
+#include "platform.h"
 #include "screen.h"
 #include "audio.h"
 #include "input.h"
@@ -642,7 +643,11 @@ void Call_NotifyMousePos ()
 
 static void Call_Idle ()
 {
-	SDL_Delay (0);
+	/* This used to be SDL_Delay(0), which does not yield - it is a busy
+	 * wait that pins a core. Harmless enough on a desktop in 2006, but on
+	 * a phone it is pure heat and battery drain. Sleep for a real tick;
+	 * the game's pacing comes from the 50Hz VBL timer, not from here. */
+	SDL_Delay (1);
 }
 
 void Call_HostUpdate ()
@@ -738,57 +743,62 @@ void DumpRegsChanged ()
 }
 #endif
 
+/* Pull a NUL-terminated filename out of 68k memory at the given address.
+ * The 68k side has no idea how big our buffer is, so bound the copy. */
+static void read_68k_filename (int p, char *buf, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i + 1 < len; i++) {
+		buf[i] = STMemory_ReadByte (p++);
+		if (!buf[i]) return;
+	}
+	buf[len - 1] = '\0';
+}
+
 static void Call_Fdelete ()
 {
-	int p, i;
-	char filename[64];
+	char filename[64], path[MAX_FILENAME_LENGTH];
 
-	p = GetReg (REG_D1);
-	for (i=0; ; i++) {
-		filename[i] = STMemory_ReadByte (p++);
-		if (!filename[i]) break;
+	read_68k_filename (GetReg (REG_D1), filename, sizeof (filename));
+
+	if (!Platform_SavePath (filename, path, sizeof (path))) {
+		SetReg (REG_D0, -1);
+		return;
 	}
 
-	SetReg (REG_D0, remove (filename));
+	SetReg (REG_D0, remove (path));
 }
 
 static void Call_Fwrite ()
 {
-	int p, i;
 	int pBuf = GetReg (REG_A4);
 	int len = GetReg (REG_D7);
-	char filename[64];
+	char filename[64], path[MAX_FILENAME_LENGTH];
 	FILE *f;
 
-	p = GetReg (REG_D1);
-	for (i=0; ; i++) {
-		filename[i] = STMemory_ReadByte (p++);
-		if (!filename[i]) break;
-	}
+	read_68k_filename (GetReg (REG_D1), filename, sizeof (filename));
 
-	if (!(f = fopen (filename, "wb"))) {
+	if (!Platform_SavePath (filename, path, sizeof (path)) ||
+	    !(f = fopen (path, "wb"))) {
 		SetReg (REG_D0, 0);
 	} else {
 		SetReg (REG_D0, fwrite (STRam+pBuf, 1, len, f));
 		fclose (f);
 	}
 }
-	
+
 static void Call_Fread ()
 {
-	int p, i;
 	int pBuf = GetReg (REG_A4);
 	int len = GetReg (REG_D7);
-	char filename[64];
+	char filename[64], path[MAX_FILENAME_LENGTH];
 	FILE *f;
 
-	p = GetReg (REG_D1);
-	for (i=0; ; i++) {
-		filename[i] = STMemory_ReadByte (p++);
-		if (!filename[i]) break;
-	}
+	read_68k_filename (GetReg (REG_D1), filename, sizeof (filename));
 
-	if (!(f = fopen (filename, "rb"))) {
+	if (!Platform_SavePath (filename, path, sizeof (path)) ||
+	    !(f = fopen (path, "rb"))) {
 		SetReg (REG_D0, 0);
 	} else {
 		SetReg (REG_D0, fread (STRam+pBuf, 1, len, f));
@@ -803,18 +813,17 @@ static char cur_dir[1024];
 
 static void Call_Fopendir ()
 {
-	int p, i;
 	char name[64];
 
-	p = GetReg (REG_A2);
-	for (i=0; ; i++) {
-		name[i] = STMemory_ReadByte (p++);
-		if (!name[i]) break;
-	}
+	read_68k_filename (GetReg (REG_A2), name, sizeof (name));
 
-	strncpy (cur_dir, name, 1024);
-	
-	poodir = opendir (name);
+	/* The game asks for its own save directory by whatever relative name
+	 * it used when writing. There is only one save location, so point
+	 * every request at it. */
+	(void)name;
+	snprintf (cur_dir, sizeof (cur_dir), "%s", Platform_SaveDir ());
+
+	poodir = opendir (cur_dir);
 	if (poodir) {
 		struct dirent *dent;
 		/* skip '.' and '..' */
@@ -828,7 +837,9 @@ static void Call_Fopendir ()
 
 static void Call_Fclosedir ()
 {
+	if (!poodir) return;
 	closedir (poodir);
+	poodir = NULL;
 }
 
 /* make sure fe2.s is allocating enough space at a0... */
@@ -841,19 +852,32 @@ static void Call_Freaddir ()
 	/* filename into buffer (a0), attributes d2, len d1 */
 	char full_path_shit[1024];
 	struct stat _stat;
-	struct dirent *dent = readdir (poodir);
+	struct dirent *dent;
+
+	if (!poodir) {
+		SetReg (REG_D0, -1);
+		return;
+	}
+
+	dent = readdir (poodir);
 	if (dent == NULL) {
 		SetReg (REG_D0, -1);
 		return;
 	}
 	strncpy (name, dent->d_name, MAX_FILENAME_LEN);
 	name[MAX_FILENAME_LEN-1] = '\0';
-	
-	strncpy (full_path_shit, cur_dir, 1024);
-	strncat (full_path_shit, "/", 1024);
-	strncat (full_path_shit, dent->d_name, 1024);
-	stat (full_path_shit, &_stat);
-	
+
+	/* The old strncat calls passed the buffer size as the append limit,
+	 * which is not what strncat's third argument means - it would happily
+	 * run past the end. */
+	snprintf (full_path_shit, sizeof (full_path_shit), "%s/%s",
+			cur_dir, dent->d_name);
+
+	if (stat (full_path_shit, &_stat) != 0) {
+		SetReg (REG_D0, -1);
+		return;
+	}
+
 	len = _stat.st_size;
 	attribs = (S_ISDIR (_stat.st_mode) ? 0x10 : 0);
 	

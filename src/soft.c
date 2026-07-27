@@ -6,13 +6,19 @@
 */
 
 #include <SDL.h>
-#include <SDL_image.h>
 
 #include "main.h"
 #include "../m68000.h"
 #include "screen.h"
 #include "input.h"
 #include "joystick.h"
+#include "platform.h"
+#include "touch.h"
+#include "cursor_data.h"
+
+/* The ST framebuffer this renderer presents. Fixed by the game. */
+#define ST_W	320
+#define ST_H	200
 
 unsigned long VideoBase;                        /* Base address in ST Ram for screen(read on each VBL) */
 unsigned char *VideoRaster;                      /* Pointer to Video raster, after VideoBase in PC address space. Use to copy data on HBL */
@@ -27,8 +33,13 @@ static unsigned short CtrlRGBPalette[16];
 
 unsigned long logscreen, logscreen2, physcreen, physcreen2;
 
-static SDL_Surface *sdlscrn;                             /* The SDL screen surface */
-static SDL_Surface *cursor;
+static SDL_Window *window;
+static SDL_Renderer *renderer;
+static SDL_Texture *screen_tex;		/* ST framebuffer, RGB565 */
+static SDL_Texture *cursor_tex;		/* embedded arrow cursor */
+
+/* Where the ST image is drawn inside the window, in output pixels. */
+static TOUCH_VIEWPORT viewport;
 
 BOOL bGrabMouse = FALSE;                          /* Grab the mouse cursor in the window */
 BOOL bInFullScreen = FALSE;
@@ -45,47 +56,167 @@ int mouse_shown = 0;
 int screen_w = 320;
 int screen_h = 200;
 
-static void change_vidmode ()
-{
-	int modes;
-	const SDL_VideoInfo *info = SDL_GetVideoInfo ();
+/*-----------------------------------------------------------------------*/
+/*
+  Work out where the 320x200 image sits inside the window.
 
-	assert (info != NULL);
-	
-	modes = SDL_HWSURFACE | SDL_DOUBLEBUF | (bInFullScreen ? SDL_FULLSCREEN : 0);
-	
-	if ((sdlscrn = SDL_SetVideoMode (screen_w, screen_h, 16
-				/*info->vfmt->BitsPerPixel*/, modes)) == 0) {
-		fprintf (stderr, "Video mode set failed: %s\n", SDL_GetError ());
-		SDL_Quit ();
-		exit (-1);
+  The image keeps its 1.6 aspect ratio, so one axis has slack. Horizontal
+  slack is split evenly, but vertical slack is all pushed to the bottom
+  rather than centred: that turns it into a band the touch controls can
+  live in instead of covering the cockpit. On a foldable this is the
+  difference between the two states - folded, the screen is long and thin,
+  the image is height-limited and there is no band, so the controls
+  overlay; unfolded, the screen is nearly square, the band is deep, and
+  the controls drop into it.
+*/
+static void recalc_viewport (void)
+{
+	int out_w, out_h;
+
+	SDL_GetRendererOutputSize (renderer, &out_w, &out_h);
+	if (out_w < 1) out_w = 1;
+	if (out_h < 1) out_h = 1;
+
+	if (out_w * ST_H >= out_h * ST_W) {
+		/* Window is wider than the image: height limited. */
+		viewport.h = out_h;
+		viewport.w = out_h * ST_W / ST_H;
+		viewport.x = (out_w - viewport.w) / 2;
+		viewport.y = 0;
+	} else {
+		/* Window is taller than the image: width limited. */
+		viewport.w = out_w;
+		viewport.h = out_w * ST_H / ST_W;
+		viewport.x = 0;
+		viewport.y = 0;
 	}
+
+	/* screen_w/screen_h are the game's mouse coordinate space. Keeping
+	 * them equal to the on-screen image size means a pixel of pointer
+	 * movement is a pixel on screen at any window size. */
+	screen_w = viewport.w;
+	screen_h = viewport.h;
+
+	if (input.abs_x >= screen_w) input.abs_x = screen_w - 1;
+	if (input.abs_y >= screen_h) input.abs_y = screen_h - 1;
+	if (input.abs_x < 0) input.abs_x = 0;
+	if (input.abs_y < 0) input.abs_y = 0;
+
+	Touch_Layout (out_w, out_h, &viewport);
+}
+
+void Screen_HandleResize (void)
+{
+	if (renderer) recalc_viewport ();
+}
+
+int Screen_ViewportX (void)
+{
+	return viewport.x;
+}
+
+int Screen_ViewportY (void)
+{
+	return viewport.y;
+}
+
+static void create_cursor_texture (void)
+{
+	Uint32 pixels[CURSOR_W * CURSOR_H];
+	int i;
+
+	/* Expand the embedded palette-indexed cursor to RGBA8888. */
+	for (i = 0; i < CURSOR_W * CURSOR_H; i++) {
+		const unsigned char *c = CURSOR_PALETTE[CURSOR_PIXELS[i]];
+
+		pixels[i] = ((Uint32)c[3] << 24) | ((Uint32)c[2] << 16) |
+			((Uint32)c[1] << 8) | (Uint32)c[0];
+	}
+
+	cursor_tex = SDL_CreateTexture (renderer, SDL_PIXELFORMAT_ABGR8888,
+			SDL_TEXTUREACCESS_STATIC, CURSOR_W, CURSOR_H);
+	if (!cursor_tex) {
+		fprintf (stderr, "Cannot create cursor texture: %s\n",
+				SDL_GetError ());
+		return;
+	}
+
+	SDL_SetTextureBlendMode (cursor_tex, SDL_BLENDMODE_BLEND);
+	SDL_UpdateTexture (cursor_tex, NULL, pixels, CURSOR_W * sizeof (Uint32));
 }
 
 void Screen_Init(void)
 {
-	SDL_ShowCursor(SDL_DISABLE);
+	Uint32 flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_ALLOW_HIGHDPI;
 
-	change_vidmode ();
+#ifdef __ANDROID__
+	/* There is no windowed mode to go back to, and the window must be
+	 * allowed to resize: on a foldable, unfolding resizes it. */
+	flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+#else
+	if (bInFullScreen) flags |= SDL_WINDOW_FULLSCREEN_DESKTOP;
+#endif
 
-	cursor = IMG_Load("cursor.png");
-	
-	/* Configure some SDL stuff: */
-	SDL_WM_SetCaption(PROG_NAME, "Frontier");
-	SDL_EventState(SDL_MOUSEMOTION, SDL_ENABLE);
-	SDL_EventState(SDL_MOUSEBUTTONDOWN, SDL_ENABLE);
-	SDL_EventState(SDL_MOUSEBUTTONUP, SDL_ENABLE);
+	window = SDL_CreateWindow (PROG_NAME, SDL_WINDOWPOS_UNDEFINED,
+			SDL_WINDOWPOS_UNDEFINED, screen_w, screen_h, flags);
+	if (!window) {
+		fprintf (stderr, "Cannot create window: %s\n", SDL_GetError ());
+		SDL_Quit ();
+		exit (-1);
+	}
+
+	/* Present on vsync: the game paces itself from a 50Hz timer, so
+	 * without this it spins redrawing frames nobody sees, which on a
+	 * phone is just heat. */
+	renderer = SDL_CreateRenderer (window, -1,
+			SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC);
+	if (!renderer)
+		renderer = SDL_CreateRenderer (window, -1, 0);
+	if (!renderer) {
+		fprintf (stderr, "Cannot create renderer: %s\n", SDL_GetError ());
+		SDL_Quit ();
+		exit (-1);
+	}
+
+	/* The ST framebuffer is palette-indexed and converted to 16-bit on
+	 * the fly, so RGB565 is the natural upload format. */
+	screen_tex = SDL_CreateTexture (renderer, SDL_PIXELFORMAT_RGB565,
+			SDL_TEXTUREACCESS_STREAMING, ST_W, ST_H);
+	if (!screen_tex) {
+		fprintf (stderr, "Cannot create screen texture: %s\n",
+				SDL_GetError ());
+		SDL_Quit ();
+		exit (-1);
+	}
+
+	create_cursor_texture ();
+
+	SDL_ShowCursor (SDL_DISABLE);
+	recalc_viewport ();
 }
 
 void Screen_UnInit(void)
 {
-	SDL_FreeSurface(cursor);
+	if (cursor_tex) SDL_DestroyTexture (cursor_tex);
+	if (screen_tex) SDL_DestroyTexture (screen_tex);
+	if (renderer) SDL_DestroyRenderer (renderer);
+	if (window) SDL_DestroyWindow (window);
+	cursor_tex = NULL;
+	screen_tex = NULL;
+	renderer = NULL;
+	window = NULL;
 }
 
 void Screen_ToggleFullScreen ()
 {
 	bInFullScreen = !bInFullScreen;
-	change_vidmode ();
+
+	if (SDL_SetWindowFullscreen (window,
+			bInFullScreen ? SDL_WINDOW_FULLSCREEN_DESKTOP : 0) != 0)
+		fprintf (stderr, "Cannot change fullscreen mode: %s\n",
+				SDL_GetError ());
+
+	recalc_viewport ();
 }
 
 static const unsigned char font_bmp[] = {
@@ -286,10 +417,10 @@ void Screen_ToggleRenderer ()
 
 static void draw_control_panel ()
 {
-	int x, y;
-	unsigned short *pixels;
+	int x, y, pitch;
+	unsigned short *pixels, *row;
 	unsigned char *scr = VideoRaster;
-	
+
 	/* this is a big fucking hack to make starsystem names
 	 * in the starmap show up. they are the only bitmap text
 	 * things drawn within the fe2 3d renderer, which makes
@@ -305,21 +436,31 @@ static void draw_control_panel ()
 	}
 	logscreen2 = y;
 	/****************************************************/
-	
-	if (SDL_MUSTLOCK(sdlscrn))
-		SDL_LockSurface(sdlscrn);
 
-	pixels = (unsigned int *) sdlscrn->pixels;
+	if (SDL_LockTexture (screen_tex, NULL, (void **)&pixels, &pitch) != 0) {
+		fprintf (stderr, "Cannot lock screen texture: %s\n",
+				SDL_GetError ());
+		return;
+	}
 
-	for (y = 0; y < 168; y++)
-		for (x = 0; x < 320; x++)
-			*pixels++ = MainRGBPalette[*scr++];
-	for (y = 168; y < 200; y++)
-		for (x = 0; x < 320; x++)
-			*pixels++ = CtrlRGBPalette[*scr++];
+	/* The texture pitch is in bytes and need not match the row width, so
+	 * step row by row rather than running one pointer over the buffer. */
+	pitch /= (int)sizeof (*pixels);
 
-	if (SDL_MUSTLOCK(sdlscrn))
-		SDL_UnlockSurface(sdlscrn);
+	/* Top of the screen uses the main palette, the cockpit panel below
+	 * line 168 has its own. */
+	for (y = 0; y < 168; y++) {
+		row = pixels + (size_t)y * pitch;
+		for (x = 0; x < ST_W; x++)
+			*row++ = MainRGBPalette[*scr++];
+	}
+	for (y = 168; y < ST_H; y++) {
+		row = pixels + (size_t)y * pitch;
+		for (x = 0; x < ST_W; x++)
+			*row++ = CtrlRGBPalette[*scr++];
+	}
+
+	SDL_UnlockTexture (screen_tex);
 }
 
 static void BuildRGBPalette(unsigned short *rgb, unsigned short *st, int len)
@@ -338,6 +479,7 @@ void Nu_IsGLRenderer ()
 
 void Nu_DrawScreen ()
 {
+	SDL_Rect dst;
 	int y;
 
 	BuildRGBPalette(MainRGBPalette, MainPalette, len_main_palette);
@@ -345,16 +487,40 @@ void Nu_DrawScreen ()
 
 	y = logscreen2;
 	logscreen2 = physcreen;
-	DrawStr(280, 5, 15, mode_name(), 1);
+	DrawStr(280, 5, 15, (unsigned char *)mode_name(), 1);
 	logscreen2 = y;
 
 	draw_control_panel ();
 
-	if (mouse_shown && in_mouse_mode()) {
-		SDL_Rect rect = { input.abs_x, input.abs_y, 0, 0 };
-		SDL_BlitSurface(cursor, NULL, sdlscrn, &rect);
+	SDL_SetRenderDrawBlendMode (renderer, SDL_BLENDMODE_NONE);
+	SDL_SetRenderDrawColor (renderer, 0, 0, 0, 255);
+	SDL_RenderClear (renderer);
+
+	dst.x = viewport.x;
+	dst.y = viewport.y;
+	dst.w = viewport.w;
+	dst.h = viewport.h;
+	SDL_RenderCopy (renderer, screen_tex, NULL, &dst);
+
+	/* The cursor is drawn in window pixels rather than into the ST
+	 * framebuffer, so it stays sharp and a sensible physical size no
+	 * matter how far the 320x200 image has been scaled up. */
+	if (mouse_shown && in_mouse_mode() && cursor_tex) {
+		SDL_Rect crect;
+		int scale = viewport.h / ST_H;
+
+		if (scale < 1) scale = 1;
+
+		crect.x = viewport.x + input.abs_x;
+		crect.y = viewport.y + input.abs_y;
+		crect.w = CURSOR_W * scale;
+		crect.h = CURSOR_H * scale;
+		SDL_RenderCopy (renderer, cursor_tex, NULL, &crect);
 		mouse_shown = 0;
 	}
 
-	SDL_Flip(sdlscrn);
+	Touch_Update ();
+	Touch_Render (renderer);
+
+	SDL_RenderPresent (renderer);
 }

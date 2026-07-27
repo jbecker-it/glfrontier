@@ -11,6 +11,7 @@
 #include "screen.h"
 #include "shortcut.h"
 #include "hostcall.h"
+#include "touch.h"
 #include "../m68000.h"
 
 
@@ -98,19 +99,14 @@ void ShortCut_FullScreen(void)
 */
 void ShortCut_MouseMode(void)
 {
+  /* Nothing to capture on a touch device, and relative mouse mode would
+   * break the on-screen trackpad. */
+  if (Touch_Enabled ()) return;
+
   bGrabMouse = !bGrabMouse;        /* Toggle flag */
 
   if(!bInFullScreen)
-  {
-    if(bGrabMouse)
-    {
-      SDL_WM_GrabInput(SDL_GRAB_ON);
-    }
-    else
-    {
-      SDL_WM_GrabInput(SDL_GRAB_OFF);
-    }
-  }
+    SDL_SetRelativeMouseMode(bGrabMouse ? SDL_TRUE : SDL_FALSE);
 }
 
 

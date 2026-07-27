@@ -11,6 +11,27 @@
 
 #include "m68000.h"
 
+/* Determine host byte order explicitly.
+ *
+ * This used to be "#elif LITTLE_ENDIAN", which is only correct by accident:
+ * LITTLE_ENDIAN is not guaranteed to be visible here, and when it is not,
+ * the #else branch silently selects the big-endian no-op path and every
+ * word/long access into 68k memory is byte-swapped wrong. That is a silent
+ * data corruption bug on any little-endian non-i386 host, ARM included. */
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+/* GCC and clang both predefine these, on Android/bionic as well. */
+# define HOST_LITTLE_ENDIAN	(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__)
+#else
+# include <endian.h>
+# if defined(__BYTE_ORDER) && defined(__LITTLE_ENDIAN)
+#  define HOST_LITTLE_ENDIAN	(__BYTE_ORDER == __LITTLE_ENDIAN)
+# elif defined(BYTE_ORDER) && defined(LITTLE_ENDIAN)
+#  define HOST_LITTLE_ENDIAN	(BYTE_ORDER == LITTLE_ENDIAN)
+# else
+#  error "Cannot determine host byte order - refusing to guess."
+# endif
+#endif
+
 //#define likely(x)       __builtin_expect((x),1)
 //#define unlikely(x)     __builtin_expect((x),0)
 
@@ -68,31 +89,30 @@ static inline void BOUNDS_CHECK (u32 pos, int num)
 #endif /* M68K_DEBUG */
 
 
+/* 68k memory is stored big-endian. Access it through memcpy + a byteswap
+ * builtin rather than a direct cast: 68k longs are only word-aligned, so a
+ * cast-and-dereference is an unaligned load, which is undefined behaviour
+ * and can fault or get miscompiled on ARM. Every compiler folds the 2/4-byte
+ * memcpy into a single load, so this costs nothing and emits rev/bswap. */
 static inline u32 do_get_mem_long(u32 *a)
 {
-#ifdef __i386__
-	u32 val = *a;
-	__asm__ ("bswap	%0\n":"=r"(val):"0"(val));
-	return val;
-#elif LITTLE_ENDIAN
-    u8 *b = (u8 *)a;
-    return (*b << 24) | (*(b+1) << 16) | (*(b+2) << 8) | (*(b+3));
+    u32 val;
+    memcpy (&val, a, sizeof (val));
+#if HOST_LITTLE_ENDIAN
+    return __builtin_bswap32 (val);
 #else
-    return *a;
+    return val;
 #endif
 }
 
 static inline u16 do_get_mem_word(u16 *a)
 {
-#ifdef __i386__
-	u16 val = *a;
-	__asm__ ("rorw $8,%0" : "=q" (val) :  "0" (val));
-	return val;
-#elif LITTLE_ENDIAN
-    u8 *b = (u8 *)a;
-    return (*b << 8) | (*(b+1));
+    u16 val;
+    memcpy (&val, a, sizeof (val));
+#if HOST_LITTLE_ENDIAN
+    return __builtin_bswap16 (val);
 #else
-    return *a;
+    return val;
 #endif
 }
 
@@ -103,34 +123,18 @@ static inline u8 do_get_mem_byte(u8 *a)
 
 static inline void do_put_mem_long(u32 *a, u32 v)
 {
-#ifdef __i386__
-	__asm__ ("bswap	%0\n":"=r"(v):"0"(v));
-	*a = v;
-#elif LITTLE_ENDIAN
-    u8 *b = (u8 *)a;
-    
-    *b = v >> 24;
-    *(b+1) = v >> 16;    
-    *(b+2) = v >> 8;
-    *(b+3) = v;
-#else
-    *a = v;
+#if HOST_LITTLE_ENDIAN
+    v = __builtin_bswap32 (v);
 #endif
+    memcpy (a, &v, sizeof (v));
 }
 
 static inline void do_put_mem_word(u16 *a, u16 v)
 {
-#ifdef __i386__
-	__asm__ ("rorw $8,%0" : "=q" (v) :  "0" (v));
-	*a = v;
-#elif LITTLE_ENDIAN
-    u8 *b = (u8 *)a;
-    
-    *b = v >> 8;
-    *(b+1) = v;
-#else
-    *a = v;
+#if HOST_LITTLE_ENDIAN
+    v = __builtin_bswap16 (v);
 #endif
+    memcpy (a, &v, sizeof (v));
 }
 
 static inline void do_put_mem_byte(u8 *a, u8 v)

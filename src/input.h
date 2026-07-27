@@ -3,12 +3,16 @@
 #define _INPUT_H
 
 #include <SDL_keyboard.h>
+#include <SDL_scancode.h>
 
 #define	SIZE_KEYBUF	16
 #define SIZE_MOUSEBUF	16
 
 typedef struct {
-	unsigned char key_states[SDLK_LAST];
+	/* Indexed by SDL_Scancode. SDL 1.2 indexed this by keycode via
+	 * SDLK_LAST, which no longer exists - SDL2 keycodes for non-ASCII
+	 * keys are 0x40000000-based and would run off the end. */
+	unsigned char key_states[SDL_NUM_SCANCODES];
 	unsigned char key_buf[SIZE_KEYBUF];
 	unsigned char mousebut_buf[SIZE_MOUSEBUF];
 	int buf_head, buf_tail;
